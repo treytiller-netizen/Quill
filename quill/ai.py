@@ -1,5 +1,6 @@
-"""Claude layer: transcript cleanup, context-aware tone, and Command Mode."""
+"""Claude layer: cleanup, context-aware tone, Command Mode, voice profiling."""
 
+import json
 import logging
 
 import anthropic
@@ -106,6 +107,53 @@ class Brain:
         context = f"\n\nThe user is dictating into: {app_name}." if app_name else ""
         result = self._call(CLEANUP_PROMPT + self._dictionary_terms() + context, transcript)
         return result or transcript
+
+    def voice_profile(self, transcripts: str) -> dict | None:
+        """Analyze recent dictations into a Wispr-style voice profile card."""
+        if not self.available or not transcripts.strip():
+            return None
+        try:
+            response = self._client.messages.create(
+                model=config.CLAUDE_MODEL,
+                max_tokens=1024,
+                system=(
+                    "You analyze a user's recent voice dictations and produce a fun, "
+                    "insightful 'voice profile'. Be specific to what they actually talk "
+                    "about; warm, a little playful, never generic."
+                ),
+                messages=[{
+                    "role": "user",
+                    "content": "Recent dictations (newest first):\n\n" + transcripts,
+                }],
+                output_config={
+                    "effort": "low",
+                    "format": {
+                        "type": "json_schema",
+                        "schema": {
+                            "type": "object",
+                            "properties": {
+                                "title": {"type": "string",
+                                          "description": "2-3 word archetype, e.g. 'Clarification Champion'"},
+                                "description": {"type": "string",
+                                                "description": "2 sentences on how they use their voice"},
+                                "catchphrase": {"type": "string",
+                                                "description": "a short phrase they actually say often"},
+                                "style_note": {"type": "string",
+                                               "description": "1 sentence on their speaking style"},
+                            },
+                            "required": ["title", "description", "catchphrase", "style_note"],
+                            "additionalProperties": False,
+                        },
+                    },
+                },
+            )
+            if response.stop_reason == "refusal":
+                return None
+            text = next(b.text for b in response.content if b.type == "text")
+            return json.loads(text)
+        except Exception as exc:
+            log.warning("Voice profile generation failed: %s", exc)
+            return None
 
     def command(self, instruction: str, selection: str, app_name: str | None) -> str | None:
         """Command Mode. Returns text to insert, or None on failure."""

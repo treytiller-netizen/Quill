@@ -7,6 +7,7 @@ dependencies = [
     "rumps>=0.4.0",
     "pyobjc-framework-Quartz>=10.0",
     "pyobjc-framework-ApplicationServices>=10.0",
+    "pyobjc-framework-WebKit>=10.0",
     "sounddevice>=0.4.6",
     "numpy>=1.26",
     "mlx-whisper>=0.4.1",

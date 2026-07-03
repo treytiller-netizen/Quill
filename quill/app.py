@@ -14,7 +14,7 @@ import rumps
 import sounddevice as sd
 from AppKit import NSWorkspace
 
-from . import config, history, keys
+from . import config, history, keys, window
 from .ai import Brain
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s: %(message)s")
@@ -136,8 +136,9 @@ class QuillApp(rumps.App):
         self.status_item.set_callback(None)
         self.stats_item = rumps.MenuItem(f"This week: {history.words_this_week():,} words")
         self.stats_item.set_callback(None)
+        window.init(self.brain)
         self.recent_menu = rumps.MenuItem("Recent")
-        self.history_item = rumps.MenuItem("Open History…", callback=lambda _: history.open_viewer())
+        self.history_item = rumps.MenuItem("Open Quill Hub…", callback=lambda _: window.show_hub())
         self.cleanup_item = rumps.MenuItem("AI cleanup (Claude)", callback=self._toggle_cleanup)
         self.cleanup_item.state = int(self.brain.cleanup_enabled)
         self.dict_item = rumps.MenuItem("Edit Dictionary…", callback=self._open_dictionary)
@@ -345,7 +346,8 @@ class QuillApp(rumps.App):
                 return
             text = self.brain.clean(transcript, self._target_app)
             insert_text(text)
-            history.add(transcript, text, self._target_app, mode="dictate")
+            history.add(transcript, text, self._target_app, mode="dictate",
+                        duration=len(audio) / config.SAMPLE_RATE)
             self._after_insert()
         except Exception as exc:
             log.error("Dictation failed: %s", exc)
@@ -367,7 +369,8 @@ class QuillApp(rumps.App):
                 self._bar_state("flash", "✗ command failed")
                 return
             insert_text(result)
-            history.add(instruction, result, self._target_app, mode="command")
+            history.add(instruction, result, self._target_app, mode="command",
+                        duration=len(audio) / config.SAMPLE_RATE)
             self._after_insert()
         except Exception as exc:
             log.error("Command mode failed: %s", exc)
@@ -379,6 +382,7 @@ class QuillApp(rumps.App):
         self._bar_state("flash", "✓ inserted")
         self.stats_item.title = f"This week: {history.words_this_week():,} words"
         self._refresh_recent_menu()
+        window.maybe_refresh_voice_profile()
 
     # --- menu -----------------------------------------------------------------
 
@@ -420,16 +424,16 @@ class QuillApp(rumps.App):
 
 
 def _install_dock_delegate() -> None:
-    """Clicking Quill's Dock icon while it's running opens the history page
-    (its 'main window'), like reopening a regular desktop app."""
+    """Clicking Quill's Dock icon while it's running opens the Hub window,
+    like reopening a regular desktop app."""
     import rumps.rumps as _rumps_internal
 
     class QuillDelegate(_rumps_internal.NSApp):
         def applicationShouldHandleReopen_hasVisibleWindows_(self, _sender, _flag):
             try:
-                history.open_viewer()
+                window.show_hub()
             except Exception as exc:
-                log.error("Could not open history on Dock click: %s", exc)
+                log.error("Could not open Hub on Dock click: %s", exc)
             return False
 
     _rumps_internal.NSApp = QuillDelegate

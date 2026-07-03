@@ -1,9 +1,7 @@
-"""Transcription history: SQLite store + a styled HTML viewer."""
+"""Transcription history: SQLite store + aggregate queries for the Hub."""
 
 import datetime
-import html
 import sqlite3
-import subprocess
 import time
 
 from . import config
@@ -16,7 +14,8 @@ CREATE TABLE IF NOT EXISTS transcripts (
     mode TEXT NOT NULL DEFAULT 'dictate',
     raw TEXT NOT NULL,
     text TEXT NOT NULL,
-    words INTEGER NOT NULL
+    words INTEGER NOT NULL,
+    duration REAL
 );
 """
 
@@ -25,110 +24,122 @@ def _conn() -> sqlite3.Connection:
     config.CONFIG_DIR.mkdir(exist_ok=True)
     conn = sqlite3.connect(config.HISTORY_DB)
     conn.execute(_SCHEMA)
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(transcripts)")}
+    if "duration" not in cols:  # migrate pre-0.3 databases
+        conn.execute("ALTER TABLE transcripts ADD COLUMN duration REAL")
     return conn
 
 
-def add(raw: str, text: str, app: str | None, mode: str = "dictate") -> None:
+def add(raw: str, text: str, app: str | None, mode: str = "dictate",
+        duration: float | None = None) -> None:
     with _conn() as conn:
         conn.execute(
-            "INSERT INTO transcripts (ts, app, mode, raw, text, words) VALUES (?,?,?,?,?,?)",
-            (time.time(), app, mode, raw, text, len(text.split())),
+            "INSERT INTO transcripts (ts, app, mode, raw, text, words, duration)"
+            " VALUES (?,?,?,?,?,?,?)",
+            (time.time(), app, mode, raw, text, len(text.split()), duration),
         )
 
 
 def recent(n: int = 5) -> list[tuple[float, str, str]]:
     """Returns [(ts, app, text)] newest first."""
     with _conn() as conn:
-        rows = conn.execute(
+        return conn.execute(
             "SELECT ts, app, text FROM transcripts ORDER BY ts DESC LIMIT ?", (n,)
         ).fetchall()
-    return rows
+
+
+def entries(limit: int = 500) -> list[dict]:
+    """Full rows for the Hub feed, newest first."""
+    with _conn() as conn:
+        rows = conn.execute(
+            "SELECT ts, app, mode, raw, text, words, duration FROM transcripts"
+            " ORDER BY ts DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    return [
+        dict(ts=ts, app=app or "", mode=mode, raw=raw, text=text, words=words,
+             duration=duration or 0)
+        for ts, app, mode, raw, text, words, duration in rows
+    ]
+
+
+def _week_start() -> float:
+    now = datetime.datetime.now()
+    start = (now - datetime.timedelta(days=now.weekday())).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    return start.timestamp()
 
 
 def words_this_week() -> int:
-    now = datetime.datetime.now()
-    week_start = (now - datetime.timedelta(days=now.weekday())).replace(
-        hour=0, minute=0, second=0, microsecond=0
-    )
     with _conn() as conn:
         (total,) = conn.execute(
             "SELECT COALESCE(SUM(words), 0) FROM transcripts WHERE ts >= ?",
-            (week_start.timestamp(),),
+            (_week_start(),),
         ).fetchone()
     return total
 
 
-_VIEWER_TEMPLATE = """<!doctype html>
-<html><head><meta charset="utf-8"><title>Quill — History</title>
-<style>
-  :root {{ --paper:#f7f2ea; --ink:#17171c; --muted:#8a8378; --accent:#ff7340; }}
-  * {{ box-sizing:border-box; margin:0; }}
-  body {{ background:var(--paper); color:var(--ink);
-         font:15px/1.55 -apple-system, "SF Pro Text", Helvetica, sans-serif; padding:48px 24px; }}
-  main {{ max-width:760px; margin:0 auto; }}
-  h1 {{ font-size:28px; letter-spacing:-0.02em; margin-bottom:4px; }}
-  h1 span {{ color:var(--accent); }}
-  .sub {{ color:var(--muted); margin-bottom:28px; }}
-  input {{ width:100%; padding:12px 16px; font-size:15px; border:1px solid #e0d8cb;
-           border-radius:12px; background:#fffdf9; margin-bottom:24px; outline:none; }}
-  input:focus {{ border-color:var(--accent); }}
-  .entry {{ background:#fffdf9; border:1px solid #e8e1d4; border-radius:14px;
-            padding:16px 18px; margin-bottom:12px; }}
-  .meta {{ display:flex; gap:10px; align-items:center; color:var(--muted);
-           font-size:12px; margin-bottom:8px; }}
-  .badge {{ background:var(--ink); color:var(--paper); border-radius:99px;
-            padding:1px 9px; font-size:11px; }}
-  .badge.command {{ background:var(--accent); }}
-  .text {{ white-space:pre-wrap; }}
-  button {{ margin-left:auto; border:1px solid #e0d8cb; background:transparent;
-            border-radius:8px; padding:3px 10px; font-size:12px; cursor:pointer; color:var(--muted); }}
-  button:hover {{ color:var(--ink); border-color:var(--ink); }}
-</style></head>
-<body><main>
-  <h1>🪶 Quill <span>history</span></h1>
-  <div class="sub">{count} transcriptions · {words:,} words all-time</div>
-  <input id="q" placeholder="Search transcripts…" oninput="filter()">
-  <div id="list">{entries}</div>
-</main>
-<script>
-  function filter() {{
-    const q = document.getElementById('q').value.toLowerCase();
-    for (const el of document.querySelectorAll('.entry'))
-      el.style.display = el.innerText.toLowerCase().includes(q) ? '' : 'none';
-  }}
-  function copyText(btn) {{
-    navigator.clipboard.writeText(btn.closest('.entry').querySelector('.text').innerText);
-    btn.textContent = 'Copied ✓'; setTimeout(() => btn.textContent = 'Copy', 1200);
-  }}
-</script></body></html>
-"""
-
-_ENTRY_TEMPLATE = """<div class="entry">
-  <div class="meta"><span class="badge{cmd}">{mode}</span><span>{when}</span><span>{app}</span>
-  <button onclick="copyText(this)">Copy</button></div>
-  <div class="text">{text}</div>
-</div>"""
+def totals() -> dict:
+    with _conn() as conn:
+        n, words, spoken = conn.execute(
+            "SELECT COUNT(*), COALESCE(SUM(words),0), COALESCE(SUM(duration),0)"
+            " FROM transcripts"
+        ).fetchone()
+        wpm_words, wpm_secs = conn.execute(
+            "SELECT COALESCE(SUM(words),0), COALESCE(SUM(duration),0) FROM transcripts"
+            " WHERE mode='dictate' AND duration > 1"
+        ).fetchone()
+    return dict(
+        count=n,
+        words=words,
+        spoken_seconds=spoken,
+        week_words=words_this_week(),
+        wpm=round(wpm_words / (wpm_secs / 60)) if wpm_secs > 30 else None,
+    )
 
 
-def open_viewer() -> None:
-    """Render all history to a styled HTML page and open it."""
+def words_by_day(days: int = 182) -> dict[str, int]:
+    """{'YYYY-MM-DD': words} for the streak heatmap."""
+    since = time.time() - days * 86400
     with _conn() as conn:
         rows = conn.execute(
-            "SELECT ts, app, mode, text, words FROM transcripts ORDER BY ts DESC"
+            "SELECT date(ts, 'unixepoch', 'localtime') AS d, SUM(words)"
+            " FROM transcripts WHERE ts >= ? GROUP BY d",
+            (since,),
         ).fetchall()
-    entries = "".join(
-        _ENTRY_TEMPLATE.format(
-            cmd=" command" if mode == "command" else "",
-            mode=mode,
-            when=datetime.datetime.fromtimestamp(ts).strftime("%b %-d, %-I:%M %p"),
-            app=html.escape(app or ""),
-            text=html.escape(text),
-        )
-        for ts, app, mode, text, words in rows
-    ) or '<div class="sub">Nothing yet — hold Right ⌥ and say something.</div>'
-    page = _VIEWER_TEMPLATE.format(
-        count=len(rows), words=sum(r[4] for r in rows), entries=entries
-    )
-    out = config.CONFIG_DIR / "history.html"
-    out.write_text(page)
-    subprocess.run(["open", str(out)])
+    return dict(rows)
+
+
+def app_usage() -> list[tuple[str, int]]:
+    """[(app, words)] descending."""
+    with _conn() as conn:
+        return conn.execute(
+            "SELECT COALESCE(app,'Unknown'), SUM(words) AS w FROM transcripts"
+            " GROUP BY app ORDER BY w DESC LIMIT 8"
+        ).fetchall()
+
+
+def all_text(limit_chars: int = 24_000) -> str:
+    """Recent cleaned text, newest first, capped — feed for voice analysis."""
+    with _conn() as conn:
+        rows = conn.execute(
+            "SELECT text FROM transcripts WHERE mode='dictate' ORDER BY ts DESC LIMIT 300"
+        ).fetchall()
+    out: list[str] = []
+    size = 0
+    for (text,) in rows:
+        size += len(text) + 1
+        if size > limit_chars:
+            break
+        out.append(text)
+    return "\n".join(out)
+
+
+def raw_clean_pairs(limit: int = 400) -> list[tuple[str, str]]:
+    with _conn() as conn:
+        return conn.execute(
+            "SELECT raw, text FROM transcripts WHERE mode='dictate'"
+            " ORDER BY ts DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
