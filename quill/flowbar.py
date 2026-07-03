@@ -207,6 +207,8 @@ class FlowBar:
 
     def _position(self, state: str) -> None:
         w, h = _SIZES[state]
+        if state == "flash":  # size to the message
+            w = min(400, max(150, 24 + len(self._view.flash_text) * 7.5))
         screen = NSScreen.mainScreen()
         if screen is None:
             return

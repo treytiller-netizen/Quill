@@ -14,7 +14,7 @@ import rumps
 import sounddevice as sd
 from AppKit import NSWorkspace
 
-from . import config, history, keys, window
+from . import config, focus, history, keys, window
 from .ai import Brain
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s: %(message)s")
@@ -78,7 +78,7 @@ def insert_text(text: str) -> None:
     _pbcopy(text.encode("utf-8"))
     time.sleep(0.1)
     keys.paste()
-    time.sleep(0.35)
+    time.sleep(0.7)  # give the target app time to read the clipboard
     _pbcopy(saved)
 
 
@@ -345,7 +345,7 @@ class QuillApp(rumps.App):
                 self._bar_state("idle")
                 return
             text = self.brain.clean(transcript, self._target_app)
-            insert_text(text)
+            self._deliver(text)
             history.add(transcript, text, self._target_app, mode="dictate",
                         duration=len(audio) / config.SAMPLE_RATE)
             self._after_insert()
@@ -354,6 +354,25 @@ class QuillApp(rumps.App):
             self._bar_state("flash", "✗ failed")
         finally:
             self.title = ICON_IDLE
+
+    def _deliver(self, text: str) -> None:
+        """Insert into the focused text input; otherwise copy to the clipboard.
+
+        Mirrors Wispr Flow: paste only lands somewhere real. Without a focused
+        input (or without Accessibility permission), the text goes to the
+        clipboard and the Flow Bar says so.
+        """
+        if not focus.trusted():
+            _pbcopy(text.encode("utf-8"))
+            log.warning("Accessibility not granted — copied instead of pasting")
+            self._bar_state("flash", "📋 Copied — enable Accessibility to insert")
+            return
+        if focus.text_input_focused():
+            insert_text(text)
+            self._bar_state("flash", "✓ inserted")
+        else:
+            _pbcopy(text.encode("utf-8"))
+            self._bar_state("flash", "📋 Copied — press ⌘V")
 
     def _process_command(self, audio: np.ndarray) -> None:
         try:
@@ -368,7 +387,7 @@ class QuillApp(rumps.App):
             if result is None:
                 self._bar_state("flash", "✗ command failed")
                 return
-            insert_text(result)
+            self._deliver(result)
             history.add(instruction, result, self._target_app, mode="command",
                         duration=len(audio) / config.SAMPLE_RATE)
             self._after_insert()
@@ -379,7 +398,6 @@ class QuillApp(rumps.App):
             self.title = ICON_IDLE
 
     def _after_insert(self) -> None:
-        self._bar_state("flash", "✓ inserted")
         self.stats_item.title = f"This week: {history.words_this_week():,} words"
         self._refresh_recent_menu()
         window.maybe_refresh_voice_profile()
