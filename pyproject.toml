@@ -5,7 +5,8 @@ description = "Quill — local voice dictation for macOS. Hold a key, speak, pol
 requires-python = ">=3.11"
 dependencies = [
     "rumps>=0.4.0",
-    "pynput>=1.7.6",
+    "pyobjc-framework-Quartz>=10.0",
+    "pyobjc-framework-ApplicationServices>=10.0",
     "sounddevice>=0.4.6",
     "numpy>=1.26",
     "mlx-whisper>=0.4.1",

@@ -38,7 +38,6 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>CFBundleShortVersionString</key><string>0.2.0</string>
     <key>CFBundleVersion</key>           <string>0.2.0</string>
     <key>LSMinimumSystemVersion</key>    <string>13.0</string>
-    <key>LSUIElement</key>               <true/>
     <key>NSMicrophoneUsageDescription</key>
     <string>Quill records your voice while you hold the dictation key so it can transcribe what you say.</string>
 </dict>

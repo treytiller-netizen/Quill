@@ -2,17 +2,18 @@
 
 from pathlib import Path
 
-from pynput import keyboard
-
 # --- Hotkeys ----------------------------------------------------------------
+# Virtual keycode + device modifier mask pairs (see quill/keys.py).
 # Hold to dictate; release to transcribe + insert.
 # Double-tap quickly for hands-free mode (tap again to stop).
-DICTATE_KEY = keyboard.Key.alt_r  # Right Option
+DICTATE_KEYCODE = 61      # Right Option
+DICTATE_MASK = 0x0040     # NX_DEVICERALTKEYMASK
 
 # Hold to use Command Mode: select text first, then hold and speak an
 # instruction ("make this more professional", "turn into bullet points").
 # With nothing selected, it answers/generates and inserts the result.
-COMMAND_KEY = keyboard.Key.cmd_r  # Right Command
+COMMAND_KEYCODE = 54      # Right Command
+COMMAND_MASK = 0x0010     # NX_DEVICERCMDKEYMASK
 
 DOUBLE_TAP_SECONDS = 0.5   # max gap between taps to trigger hands-free mode
 TAP_MAX_SECONDS = 0.35     # a press shorter than this counts as a "tap"
@@ -25,9 +26,9 @@ SAMPLE_RATE = 16_000
 MIN_RECORDING_SECONDS = 0.4  # ignore accidental taps
 
 # --- AI (cleanup + Command Mode) ---------------------------------------------
-# Uses the Anthropic API when credentials are available (ANTHROPIC_API_KEY or
-# an `ant auth login` profile). Cleanup degrades gracefully to the raw
-# transcript; Command Mode requires credentials.
+# Uses the Anthropic API when credentials are available (ANTHROPIC_API_KEY,
+# usually via ~/.quill/env for Dock launches). Cleanup degrades gracefully to
+# the raw transcript; Command Mode requires credentials.
 CLEANUP_ENABLED = True
 CLAUDE_MODEL = "claude-opus-4-8"
 CLAUDE_TIMEOUT_SECONDS = 20.0

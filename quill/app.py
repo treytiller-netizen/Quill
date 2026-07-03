@@ -1,4 +1,4 @@
-"""Quill — menu bar + Flow Bar app.
+"""Quill — menu bar + Flow Bar + Dock app.
 
 Hold Right Option: dictate (release to insert). Double-tap it: hands-free.
 Hold Right Command with text selected: Command Mode (speak an edit instruction).
@@ -13,9 +13,8 @@ import numpy as np
 import rumps
 import sounddevice as sd
 from AppKit import NSWorkspace
-from pynput import keyboard
 
-from . import config, history
+from . import config, history, keys
 from .ai import Brain
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s: %(message)s")
@@ -25,6 +24,10 @@ ICON_IDLE = "🪶"
 ICON_RECORDING = "🔴"
 ICON_WORKING = "⏳"
 ICON_LOADING = "⏬"
+
+INPUT_MONITORING_PANE = (
+    "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent"
+)
 
 
 class Recorder:
@@ -74,10 +77,7 @@ def insert_text(text: str) -> None:
     saved = _pbpaste()
     _pbcopy(text.encode("utf-8"))
     time.sleep(0.1)
-    kb = keyboard.Controller()
-    with kb.pressed(keyboard.Key.cmd):
-        kb.press("v")
-        kb.release("v")
+    keys.paste()
     time.sleep(0.35)
     _pbcopy(saved)
 
@@ -86,10 +86,7 @@ def capture_selection() -> str:
     """Copy the current selection via ⌘C and return it. Restores the clipboard."""
     saved = _pbpaste()
     _pbcopy(b"")
-    kb = keyboard.Controller()
-    with kb.pressed(keyboard.Key.cmd):
-        kb.press("c")
-        kb.release("c")
+    keys.copy()
     time.sleep(0.2)
     selection = _pbpaste().decode("utf-8", errors="replace")
     _pbcopy(saved)
@@ -110,10 +107,25 @@ class QuillApp(rumps.App):
         self.brain = Brain()
         self.recorder = Recorder(on_level=self._on_level)
         self.flowbar = None
+        self.hotkeys = keys.HotkeyTap(
+            {
+                config.DICTATE_KEYCODE: (
+                    config.DICTATE_MASK,
+                    self._dictate_pressed,
+                    self._dictate_released,
+                ),
+                config.COMMAND_KEYCODE: (
+                    config.COMMAND_MASK,
+                    self._command_pressed,
+                    self._command_released,
+                ),
+            }
+        )
 
         self._mode: str | None = None  # None | "dictate" | "command"
         self._handsfree = False
         self._model_ready = False
+        self._hotkeys_ready = False
         self._press_time = 0.0
         self._last_tap = 0.0
         self._selection = ""
@@ -142,22 +154,60 @@ class QuillApp(rumps.App):
         ]
         self._refresh_recent_menu()
 
-        # The Flow Bar needs the AppKit run loop — create it just after launch.
+        # Everything touching the AppKit run loop happens just after launch.
         self._boot_timer = rumps.Timer(self._post_launch, 0.5)
         self._boot_timer.start()
 
         threading.Thread(target=self._warm_up_model, daemon=True).start()
-        self._listener = keyboard.Listener(on_press=self._on_press, on_release=self._on_release)
-        self._listener.start()
 
     # --- boot -----------------------------------------------------------------
 
     def _post_launch(self, timer: rumps.Timer) -> None:
         timer.stop()
+        # Behave like a regular desktop app: Dock icon with a running indicator,
+        # right-click → Quit, ⌘Q.
+        from AppKit import NSApplication, NSApplicationActivationPolicyRegular
+
+        NSApplication.sharedApplication().setActivationPolicy_(
+            NSApplicationActivationPolicyRegular
+        )
+
+        # Trigger the one-time Accessibility prompt (needed for pasting).
+        try:
+            from ApplicationServices import (
+                AXIsProcessTrustedWithOptions,
+                kAXTrustedCheckOptionPrompt,
+            )
+
+            AXIsProcessTrustedWithOptions({kAXTrustedCheckOptionPrompt: True})
+        except Exception:
+            log.exception("Accessibility trust check failed")
+
         if config.FLOWBAR_ENABLED and self.flowbar is None:
             from .flowbar import FlowBar
 
             self.flowbar = FlowBar(on_click=self._bar_clicked)
+
+        # Hotkey tap needs Input Monitoring; installing it triggers the prompt.
+        # Keep retrying until the user grants it.
+        if not self._try_install_hotkeys():
+            self._tap_timer = rumps.Timer(self._retry_hotkeys, 2)
+            self._tap_timer.start()
+
+    def _try_install_hotkeys(self) -> bool:
+        if self.hotkeys.install():
+            self._hotkeys_ready = True
+            self._update_status()
+            return True
+        self.status_item.title = "⚠️ Grant Input Monitoring (click to open)"
+        self.status_item.set_callback(
+            lambda _: subprocess.run(["open", INPUT_MONITORING_PANE])
+        )
+        return False
+
+    def _retry_hotkeys(self, timer: rumps.Timer) -> None:
+        if self._try_install_hotkeys():
+            timer.stop()
 
     def _warm_up_model(self) -> None:
         import mlx_whisper
@@ -167,8 +217,15 @@ class QuillApp(rumps.App):
         mlx_whisper.transcribe(silence, path_or_hf_repo=config.WHISPER_MODEL)
         self._model_ready = True
         self.title = ICON_IDLE
-        self.status_item.title = "Ready — hold Right ⌥ to talk, Right ⌘ for commands"
+        self._update_status()
         log.info("Model ready.")
+
+    def _update_status(self) -> None:
+        if not self._model_ready:
+            return
+        if self._hotkeys_ready:
+            self.status_item.title = "Ready — hold Right ⌥ to talk, Right ⌘ for commands"
+            self.status_item.set_callback(None)
 
     # --- levels → flow bar --------------------------------------------------------
 
@@ -185,30 +242,34 @@ class QuillApp(rumps.App):
 
     # --- hotkeys --------------------------------------------------------------
 
-    def _on_press(self, key) -> None:
+    def _dictate_pressed(self) -> None:
         if not self._model_ready:
             return
-        if key == config.DICTATE_KEY:
-            if self._handsfree:
-                self._finish_dictation()
-            elif self._mode is None:
-                self._start(mode="dictate")
-        elif key == config.COMMAND_KEY and self._mode is None:
+        if self._handsfree:
+            self._finish_dictation()
+        elif self._mode is None:
+            self._start(mode="dictate")
+
+    def _dictate_released(self) -> None:
+        if self._mode != "dictate" or self._handsfree:
+            return
+        duration = time.time() - self._press_time
+        if duration < config.TAP_MAX_SECONDS:
+            if self._press_time - self._last_tap < config.DOUBLE_TAP_SECONDS:
+                self._handsfree = True  # double-tap → keep recording hands-free
+                return
+            self._last_tap = self._press_time
+            self._abort_recording()
+            return
+        self._finish_dictation()
+
+    def _command_pressed(self) -> None:
+        if self._model_ready and self._mode is None:
             self._start(mode="command")
             threading.Thread(target=self._grab_selection, daemon=True).start()
 
-    def _on_release(self, key) -> None:
-        if key == config.DICTATE_KEY and self._mode == "dictate" and not self._handsfree:
-            duration = time.time() - self._press_time
-            if duration < config.TAP_MAX_SECONDS:
-                if self._press_time - self._last_tap < config.DOUBLE_TAP_SECONDS:
-                    self._handsfree = True  # double-tap → keep recording hands-free
-                    return
-                self._last_tap = self._press_time
-                self._abort_recording()
-                return
-            self._finish_dictation()
-        elif key == config.COMMAND_KEY and self._mode == "command":
+    def _command_released(self) -> None:
+        if self._mode == "command":
             self._finish_command()
 
     def _bar_clicked(self) -> None:
@@ -285,7 +346,7 @@ class QuillApp(rumps.App):
             text = self.brain.clean(transcript, self._target_app)
             insert_text(text)
             history.add(transcript, text, self._target_app, mode="dictate")
-            self._after_insert(text)
+            self._after_insert()
         except Exception as exc:
             log.error("Dictation failed: %s", exc)
             self._bar_state("flash", "✗ failed")
@@ -307,14 +368,14 @@ class QuillApp(rumps.App):
                 return
             insert_text(result)
             history.add(instruction, result, self._target_app, mode="command")
-            self._after_insert(result)
+            self._after_insert()
         except Exception as exc:
             log.error("Command mode failed: %s", exc)
             self._bar_state("flash", "✗ failed")
         finally:
             self.title = ICON_IDLE
 
-    def _after_insert(self, text: str) -> None:
+    def _after_insert(self) -> None:
         self._bar_state("flash", "✓ inserted")
         self.stats_item.title = f"This week: {history.words_this_week():,} words"
         self._refresh_recent_menu()
@@ -358,7 +419,24 @@ class QuillApp(rumps.App):
         subprocess.run(["open", "-t", str(config.DICTIONARY_FILE)])
 
 
+def _install_dock_delegate() -> None:
+    """Clicking Quill's Dock icon while it's running opens the history page
+    (its 'main window'), like reopening a regular desktop app."""
+    import rumps.rumps as _rumps_internal
+
+    class QuillDelegate(_rumps_internal.NSApp):
+        def applicationShouldHandleReopen_hasVisibleWindows_(self, _sender, _flag):
+            try:
+                history.open_viewer()
+            except Exception as exc:
+                log.error("Could not open history on Dock click: %s", exc)
+            return False
+
+    _rumps_internal.NSApp = QuillDelegate
+
+
 def main() -> None:
+    _install_dock_delegate()
     QuillApp().run()
 
 
