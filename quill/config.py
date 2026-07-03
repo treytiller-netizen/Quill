@@ -1,0 +1,47 @@
+"""User-tweakable settings for Quill."""
+
+from pathlib import Path
+
+from pynput import keyboard
+
+# --- Hotkeys ----------------------------------------------------------------
+# Hold to dictate; release to transcribe + insert.
+# Double-tap quickly for hands-free mode (tap again to stop).
+DICTATE_KEY = keyboard.Key.alt_r  # Right Option
+
+# Hold to use Command Mode: select text first, then hold and speak an
+# instruction ("make this more professional", "turn into bullet points").
+# With nothing selected, it answers/generates and inserts the result.
+COMMAND_KEY = keyboard.Key.cmd_r  # Right Command
+
+DOUBLE_TAP_SECONDS = 0.5   # max gap between taps to trigger hands-free mode
+TAP_MAX_SECONDS = 0.35     # a press shorter than this counts as a "tap"
+
+# --- Transcription ----------------------------------------------------------
+# Any MLX-converted Whisper repo on Hugging Face. large-v3-turbo is the best
+# accuracy/speed tradeoff on Apple Silicon and auto-detects 100+ languages.
+WHISPER_MODEL = "mlx-community/whisper-large-v3-turbo"
+SAMPLE_RATE = 16_000
+MIN_RECORDING_SECONDS = 0.4  # ignore accidental taps
+
+# --- AI (cleanup + Command Mode) ---------------------------------------------
+# Uses the Anthropic API when credentials are available (ANTHROPIC_API_KEY or
+# an `ant auth login` profile). Cleanup degrades gracefully to the raw
+# transcript; Command Mode requires credentials.
+CLEANUP_ENABLED = True
+CLAUDE_MODEL = "claude-opus-4-8"
+CLAUDE_TIMEOUT_SECONDS = 20.0
+
+# --- Data --------------------------------------------------------------------
+CONFIG_DIR = Path.home() / ".quill"
+DICTIONARY_FILE = CONFIG_DIR / "dictionary.txt"
+HISTORY_DB = CONFIG_DIR / "history.db"
+
+# --- Flow bar ----------------------------------------------------------------
+FLOWBAR_ENABLED = True
+# RGBA 0-1. Branding: warm paper + ink, coral accent.
+BAR_BACKGROUND = (0.09, 0.09, 0.11, 0.94)
+BAR_ACCENT = (1.00, 0.45, 0.25, 1.0)     # dictation coral
+BAR_COMMAND = (0.55, 0.55, 1.00, 1.0)    # command-mode periwinkle
+BAR_TEXT = (0.96, 0.94, 0.90, 1.0)
+BAR_BOTTOM_MARGIN = 10  # px above the bottom of the visible screen area
