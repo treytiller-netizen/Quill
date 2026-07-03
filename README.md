@@ -16,10 +16,10 @@ your cursor with the clipboard preserved.
 | **Hands-free mode** | Double-tap **Right ⌥** to lock recording; tap again (or click the Flow Bar) to finish. |
 | **Command Mode** | Select text, hold **Right ⌘**, speak an instruction — *"make this more professional"*, *"turn into bullet points"*. With nothing selected, ask a question and the answer is typed at your cursor. |
 | **Flow Bar** | A floating pill above the Dock that follows you across Spaces and full-screen apps: live waveform while recording, pulsing while transcribing, ✓ when text lands. Click it for hands-free dictation. |
-| **History** | Every transcription saved locally (`~/.quill/history.db`). Recent five in the menu bar (click to copy); **Open History…** for a searchable page of everything. |
-| **Personal dictionary** | `~/.quill/dictionary.txt` — names and jargon get corrected to your spelling. |
+| **The Hub** | Quill's main window (click the Dock icon, or menu bar → Open Quill Hub). **Home**: date-grouped transcript feed with copy buttons + a stat rail (total words, WPM, day streak, voice-profile progress). **Insights**: WPM, fixes made by Quill, total words, per-app usage bars, a 26-week streak heatmap, and an AI Voice Profile (archetype, catchphrase, most-used word, peak time) refreshed every 1,000 words. **Dictionary**: add/remove terms with usage counts. |
+| **History** | Every transcription saved locally (`~/.quill/history.db`) with duration, powering the WPM stats. Recent five in the menu bar (click to copy). |
+| **Personal dictionary** | Names, jargon, and `btw -> by the way` replacements, corrected to your spelling. Edit in the Hub or at `~/.quill/dictionary.txt`. |
 | **Context-aware tone** | Quill knows which app you're dictating into: casual in Slack, buttoned-up in Mail, literal in your editor. |
-| **Weekly stats** | Word count in the menu bar dropdown. |
 
 ## Install
 
