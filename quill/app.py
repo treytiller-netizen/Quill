@@ -322,7 +322,10 @@ class QuillApp(rumps.App):
     # --- menu -----------------------------------------------------------------
 
     def _refresh_recent_menu(self) -> None:
-        self.recent_menu.clear()
+        # rumps MenuItem has no underlying NSMenu until an item is added;
+        # clear() on a virgin submenu raises AttributeError.
+        if self.recent_menu._menu is not None:
+            self.recent_menu.clear()
         rows = history.recent(5)
         if not rows:
             empty = rumps.MenuItem("Nothing yet")
