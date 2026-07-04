@@ -351,6 +351,9 @@ class QuillApp(rumps.App):
         self.title = ICON_RECORDING
         self._bar_state("recording" if mode == "dictate" else "command")
         self._warm_if_cold()  # page the model back in while the user speaks
+        if self.brain.cleanup_enabled and self.brain.available:
+            # open the API connection during speech too (free metadata call)
+            threading.Thread(target=self.brain.warm_connection, daemon=True).start()
 
         def start_stream() -> None:
             try:

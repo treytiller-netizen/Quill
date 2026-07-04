@@ -73,6 +73,16 @@ class Brain:
     def available(self) -> bool:
         return not self._auth_failed
 
+    def warm_connection(self) -> None:
+        """Open the TLS/HTTP connection while the user is still speaking —
+        a free metadata GET, no tokens. Saves ~1-5s on the cleanup call."""
+        if not self.available:
+            return
+        try:
+            self._client.models.retrieve(config.CLEANUP_MODEL)
+        except Exception:
+            pass
+
     def _dictionary_terms(self) -> str:
         try:
             terms = [
