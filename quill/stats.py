@@ -3,9 +3,12 @@
 import datetime
 import difflib
 import json
+import os
 import re
+import shutil
 import time
 from collections import Counter
+from pathlib import Path
 
 from . import config, history
 
@@ -131,6 +134,88 @@ def voice_profile_due() -> bool:
     return voice_profile()["words_until_update"] == 0 and history.totals()["words"] > 50
 
 
+# --- storage management -----------------------------------------------------
+
+HF_HUB = Path.home() / ".cache" / "huggingface" / "hub"
+LEGACY_FILES = [config.CONFIG_DIR / "history.html"]
+
+
+def _dir_size(path: Path) -> int:
+    total = 0
+    for root, _dirs, files in os.walk(path):
+        for f in files:
+            try:
+                total += os.path.getsize(os.path.join(root, f))
+            except OSError:
+                pass
+    return total
+
+
+def _file_size(path: Path) -> int:
+    try:
+        return path.stat().st_size
+    except OSError:
+        return 0
+
+
+def _current_model_dirname() -> str:
+    return "models--" + config.WHISPER_MODEL.replace("/", "--")
+
+
+def storage_info() -> dict:
+    """Sizes of everything Quill stores that can be cleared and regenerated."""
+    models = []
+    if HF_HUB.exists():
+        for d in sorted(HF_HUB.glob("models--*whisper*")):
+            models.append(dict(
+                name=d.name.removeprefix("models--").replace("--", "/"),
+                dirname=d.name,
+                bytes=_dir_size(d),
+                current=d.name == _current_model_dirname(),
+            ))
+    history_bytes = sum(
+        _file_size(Path(str(config.HISTORY_DB) + suffix)) for suffix in ("", "-wal", "-shm")
+    )
+    reclaimable = (
+        sum(m["bytes"] for m in models if not m["current"])
+        + history_bytes
+        + _file_size(VOICE_FILE)
+        + sum(_file_size(f) for f in LEGACY_FILES)
+    )
+    return dict(
+        models=models,
+        history_bytes=history_bytes,
+        history_count=history.totals()["count"],
+        voice_bytes=_file_size(VOICE_FILE),
+        legacy_bytes=sum(_file_size(f) for f in LEGACY_FILES),
+        reclaimable=reclaimable,
+    )
+
+
+def clear_history_data() -> None:
+    history.clear_all()
+    for f in LEGACY_FILES:
+        f.unlink(missing_ok=True)
+
+
+def reset_voice_profile() -> None:
+    VOICE_FILE.unlink(missing_ok=True)
+
+
+def remove_models(keep_current: bool = True) -> int:
+    """Delete downloaded Whisper models; returns bytes freed. Models
+    re-download automatically the next time they're needed."""
+    freed = 0
+    if not HF_HUB.exists():
+        return 0
+    for d in HF_HUB.glob("models--*whisper*"):
+        if keep_current and d.name == _current_model_dirname():
+            continue
+        freed += _dir_size(d)
+        shutil.rmtree(d, ignore_errors=True)
+    return freed
+
+
 def hub_payload() -> dict:
     """Everything the Hub UI needs, JSON-serializable."""
     t = history.totals()
@@ -152,5 +237,6 @@ def hub_payload() -> dict:
         most_used=top_words,
         peak=peak_hour(),
         voice=voice_profile(),
+        storage=storage_info(),
         today=datetime.date.today().isoformat(),
     )

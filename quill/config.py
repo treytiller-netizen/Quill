@@ -19,9 +19,11 @@ DOUBLE_TAP_SECONDS = 0.5   # max gap between taps to trigger hands-free mode
 TAP_MAX_SECONDS = 0.35     # a press shorter than this counts as a "tap"
 
 # --- Transcription ----------------------------------------------------------
-# Any MLX-converted Whisper repo on Hugging Face. large-v3-turbo is the best
-# accuracy/speed tradeoff on Apple Silicon (benchmarked vs q4 + distil variants).
-WHISPER_MODEL = "mlx-community/whisper-large-v3-turbo"
+# Any MLX-converted Whisper repo on Hugging Face. The 4-bit quantized turbo
+# uses ~1/3 the memory of full turbo at near-identical speed and accuracy —
+# the right default on an 8 GB machine (long dictations swap-thrash otherwise).
+# Full precision alternative: "mlx-community/whisper-large-v3-turbo"
+WHISPER_MODEL = "mlx-community/whisper-large-v3-turbo-q4"
 SAMPLE_RATE = 16_000
 MIN_RECORDING_SECONDS = 0.4  # ignore accidental taps
 

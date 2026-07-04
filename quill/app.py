@@ -375,6 +375,15 @@ class QuillApp(rumps.App):
             language=config.WHISPER_LANGUAGE,
             **config.WHISPER_DECODE_OPTIONS,
         )
+        # Return MLX's cached Metal buffers to the OS — on an 8 GB machine a
+        # long dictation otherwise leaves hundreds of MB parked on the GPU
+        # cache and pushes the system into swap.
+        try:
+            import mlx.core as mx
+
+            mx.clear_cache()
+        except Exception:
+            pass
         return result["text"].strip()
 
     def _process_dictation(self, audio: np.ndarray) -> None:

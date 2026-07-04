@@ -143,3 +143,12 @@ def raw_clean_pairs(limit: int = 400) -> list[tuple[str, str]]:
             " ORDER BY ts DESC LIMIT ?",
             (limit,),
         ).fetchall()
+
+
+def clear_all() -> None:
+    """Delete every transcript and reclaim the file space."""
+    with _conn() as conn:
+        conn.execute("DELETE FROM transcripts")
+    conn = sqlite3.connect(config.HISTORY_DB)
+    conn.execute("VACUUM")  # must run outside a transaction
+    conn.close()

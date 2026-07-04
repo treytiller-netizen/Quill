@@ -125,6 +125,31 @@ class HubWindow:
             self.reload(page="dictionary")
         elif action == "refreshVoice":
             threading.Thread(target=self._regen_voice, daemon=True).start()
+        elif action == "clearHistory":
+            stats.clear_history_data()
+            self._refresh_app_menu()
+            self.reload(page="storage")
+        elif action == "resetVoice":
+            stats.reset_voice_profile()
+            self.reload(page="storage")
+        elif action == "removeModels":
+            keep = bool(body.get("keepCurrent", True))
+            freed = stats.remove_models(keep_current=keep)
+            log.info("Removed model downloads, freed %.2f GB", freed / 1e9)
+            self.reload(page="storage")
+
+    @staticmethod
+    def _refresh_app_menu() -> None:
+        """Keep the menu bar's Recent list and stats in sync after a clear."""
+        try:
+            import rumps
+
+            app = getattr(rumps.App, "*app_instance", None)
+            if app is not None:
+                app.stats_item.title = f"This week: {history.words_this_week():,} words"
+                app._refresh_recent_menu()
+        except Exception:
+            log.exception("Menu refresh after clear failed")
 
     def _regen_voice(self) -> None:
         if _brain is None:
@@ -243,6 +268,7 @@ input, .txt { -webkit-user-select:text; }
   <button class="nav on" data-page="home">Home</button>
   <button class="nav" data-page="insights">Insights</button>
   <button class="nav" data-page="dictionary">Dictionary</button>
+  <button class="nav" data-page="storage">Storage</button>
   <div class="spacer"></div>
   <div id="local-card"><b>∞ Unlimited</b>Runs entirely on your Mac. No word limits, no subscription.</div>
 </div>
@@ -363,7 +389,51 @@ function dictionaryPage() {
     ${rows}`;
 }
 
-const pages = { home: homePage, insights: insightsPage, dictionary: dictionaryPage };
+const fmtB = (b) => b >= 1e9 ? (b/1e9).toFixed(2)+" GB" : b >= 1e6 ? (b/1e6).toFixed(1)+" MB" : Math.max(1, Math.round(b/1e3))+" KB";
+
+// WKWebView has no native confirm() without a UI delegate — two-click confirm.
+function confirmThen(btn, action) {
+  if (btn.dataset.armed) {
+    btn.disabled = true; btn.textContent = "Working…";
+    send(action);
+  } else {
+    btn.dataset.armed = "1"; btn.dataset.orig = btn.textContent;
+    btn.textContent = "Click again to confirm";
+    setTimeout(() => { if (!btn.disabled) { delete btn.dataset.armed; btn.textContent = btn.dataset.orig; } }, 3500);
+  }
+}
+
+function storagePage() {
+  const s = P.storage;
+  const modelRows = s.models.map(m => `<div class="term">
+      <span class="t">${esc(m.name)}${m.current ? ' <span class="chip">in use</span>' : ""}</span>
+      <span class="hits">${fmtB(m.bytes)}</span>
+    </div>`).join("") || `<div class="sub">No models downloaded.</div>`;
+  const unused = s.models.filter(m => !m.current).reduce((a,m) => a+m.bytes, 0);
+  return `<h1>Storage</h1>
+    <p class="sub" style="margin:-14px 0 18px">Everything here is safe to clear — Quill regenerates or re-downloads what it needs. Reclaimable right now: <b>${fmtB(s.reclaimable)}</b>.</p>
+
+    <div class="card" style="margin-bottom:14px"><b>Speech models</b>
+      <p class="sub" style="margin:4px 0 12px">Downloaded Whisper models. Only the one marked "in use" is needed; removed models re-download automatically if ever needed again.</p>
+      ${modelRows}
+      <div style="display:flex; gap:8px; margin-top:12px">
+        ${unused > 0 ? `<button class="btn" onclick='confirmThen(this, {action:"removeModels", keepCurrent:true})'>Remove unused models (${fmtB(unused)})</button>` : ""}
+        <button class="copy" onclick='confirmThen(this, {action:"removeModels", keepCurrent:false})'>Remove all (re-downloads on next launch)</button>
+      </div>
+    </div>
+
+    <div class="card" style="margin-bottom:14px"><b>Transcription history</b>
+      <p class="sub" style="margin:4px 0 12px">${P.storage.history_count.toLocaleString()} transcripts · ${fmtB(s.history_bytes + s.legacy_bytes)}. Clearing also resets your stats, streak, and word counts.</p>
+      <button class="btn" onclick='confirmThen(this, {action:"clearHistory"})'>Clear history</button>
+    </div>
+
+    <div class="card"><b>Voice profile</b>
+      <p class="sub" style="margin:4px 0 12px">${fmtB(s.voice_bytes)}. Regenerates from your future dictations.</p>
+      <button class="copy" onclick='confirmThen(this, {action:"resetVoice"})'>Reset voice profile</button>
+    </div>`;
+}
+
+const pages = { home: homePage, insights: insightsPage, dictionary: dictionaryPage, storage: storagePage };
 function nav(page) {
   document.querySelectorAll(".nav").forEach(b => b.classList.toggle("on", b.dataset.page === page));
   document.getElementById("main").innerHTML = pages[page]();
