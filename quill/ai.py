@@ -91,10 +91,10 @@ class Brain:
 
     def _call(self, system: str, user: str) -> str | None:
         try:
+            # Note: no `output_config.effort` — Haiku 4.5 rejects the param.
             response = self._client.messages.create(
-                model=config.CLAUDE_MODEL,
+                model=config.CLEANUP_MODEL,
                 max_tokens=4096,
-                output_config={"effort": "low"},
                 system=system,
                 messages=[{"role": "user", "content": user}],
             )
@@ -125,7 +125,7 @@ class Brain:
             return None
         try:
             response = self._client.messages.create(
-                model=config.CLAUDE_MODEL,
+                model=config.VOICE_MODEL,
                 max_tokens=1024,
                 system=(
                     "You analyze a user's recent voice dictations and produce a fun, "

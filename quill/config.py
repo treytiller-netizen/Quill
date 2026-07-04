@@ -47,7 +47,12 @@ WHISPER_DECODE_OPTIONS = dict(
 # usually via ~/.quill/env for Dock launches). Cleanup degrades gracefully to
 # the raw transcript; Command Mode requires credentials.
 CLEANUP_ENABLED = True
-CLAUDE_MODEL = "claude-opus-4-8"
+# Haiku for the per-dictation work (cleanup + Command Mode): ~5x cheaper and
+# snappier than Opus, plenty for text polishing (~0.1¢ per dictation).
+CLEANUP_MODEL = "claude-haiku-4-5"
+# Opus for the Voice Profile: runs ~once per 1,000 words, cost is negligible,
+# and the personality-analysis quality is worth it.
+VOICE_MODEL = "claude-opus-4-8"
 CLAUDE_TIMEOUT_SECONDS = 20.0
 
 # --- Data --------------------------------------------------------------------
