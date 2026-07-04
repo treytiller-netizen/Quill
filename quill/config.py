@@ -20,10 +20,23 @@ TAP_MAX_SECONDS = 0.35     # a press shorter than this counts as a "tap"
 
 # --- Transcription ----------------------------------------------------------
 # Any MLX-converted Whisper repo on Hugging Face. large-v3-turbo is the best
-# accuracy/speed tradeoff on Apple Silicon and auto-detects 100+ languages.
+# accuracy/speed tradeoff on Apple Silicon (benchmarked vs q4 + distil variants).
 WHISPER_MODEL = "mlx-community/whisper-large-v3-turbo"
 SAMPLE_RATE = 16_000
 MIN_RECORDING_SECONDS = 0.4  # ignore accidental taps
+
+# Pinning the language skips a per-dictation detection pass (~35% faster).
+# Set to None to restore automatic detection across 100+ languages.
+WHISPER_LANGUAGE = "en"
+
+# Single greedy decode pass — no temperature-fallback retry cascade, no
+# cross-segment conditioning. Benchmarked identical output at ~0.6x the time.
+WHISPER_DECODE_OPTIONS = dict(
+    temperature=0.0,
+    condition_on_previous_text=False,
+    compression_ratio_threshold=None,
+    logprob_threshold=None,
+)
 
 # --- AI (cleanup + Command Mode) ---------------------------------------------
 # Uses the Anthropic API when credentials are available (ANTHROPIC_API_KEY,

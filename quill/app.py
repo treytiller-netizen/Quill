@@ -10,6 +10,7 @@ import subprocess
 import sys
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 import rumps
@@ -75,13 +76,21 @@ def _pbcopy(data: bytes) -> None:
 
 
 def insert_text(text: str) -> None:
-    """Paste text into the frontmost app, preserving the user's clipboard."""
+    """Paste text into the frontmost app, preserving the user's clipboard.
+
+    Returns right after the paste lands; the clipboard restore happens on a
+    background timer so the caller (and the ✓ flash) isn't held up by it.
+    """
     saved = _pbpaste()
     _pbcopy(text.encode("utf-8"))
-    time.sleep(0.1)
+    time.sleep(0.05)
     keys.paste()
-    time.sleep(0.7)  # give the target app time to read the clipboard
-    _pbcopy(saved)
+
+    def restore() -> None:
+        time.sleep(0.8)  # give the target app time to read the clipboard
+        _pbcopy(saved)
+
+    threading.Thread(target=restore, daemon=True).start()
 
 
 def capture_selection() -> str:
@@ -133,6 +142,10 @@ class QuillApp(rumps.App):
         self._selection = ""
         self._target_app: str | None = None
         self._lock = threading.Lock()
+        # ALL CoreAudio stream operations run on this single worker, in order.
+        # Starting/stopping the stream on the main thread — inside the event
+        # tap callback — deadlocks CoreAudio (HALB_Mutex vs the main run loop).
+        self._audio_exec = ThreadPoolExecutor(max_workers=1, thread_name_prefix="audio")
 
         self.status_item = rumps.MenuItem("Loading Whisper model…")
         self.status_item.set_callback(None)
@@ -215,12 +228,15 @@ class QuillApp(rumps.App):
     def _warm_up_model(self) -> None:
         import mlx_whisper
 
+        ready_sentinel = config.CONFIG_DIR / "model_ready"
+        ready_sentinel.unlink(missing_ok=True)
         log.info("Loading Whisper model %s…", config.WHISPER_MODEL)
         silence = np.zeros(config.SAMPLE_RATE // 2, dtype=np.float32)
         mlx_whisper.transcribe(silence, path_or_hf_repo=config.WHISPER_MODEL)
         self._model_ready = True
         self.title = ICON_IDLE
         self._update_status()
+        ready_sentinel.touch()
         log.info("Model ready.")
 
     def _update_status(self) -> None:
@@ -295,40 +311,56 @@ class QuillApp(rumps.App):
         self._press_time = time.time()
         self._target_app = frontmost_app()
         self._selection = ""
-        try:
-            self.recorder.start()
-            self.title = ICON_RECORDING
-            self._bar_state("recording" if mode == "dictate" else "command")
-        except Exception as exc:
-            log.error("Could not open microphone: %s", exc)
-            self._mode = None
-            self.title = ICON_IDLE
-            self._bar_state("flash", "⚠️ mic unavailable")
+        self.title = ICON_RECORDING
+        self._bar_state("recording" if mode == "dictate" else "command")
+
+        def start_stream() -> None:
+            try:
+                self.recorder.start()
+            except Exception as exc:
+                log.error("Could not open microphone: %s", exc)
+                self._mode = None
+                self.title = ICON_IDLE
+                self._bar_state("flash", "⚠️ mic unavailable")
+
+        self._audio_exec.submit(start_stream)
 
     def _grab_selection(self) -> None:
         self._selection = capture_selection()
 
     def _abort_recording(self) -> None:
-        self.recorder.stop()
         self._mode = None
         self._handsfree = False
         self.title = ICON_IDLE
         self._bar_state("idle")
+        self._audio_exec.submit(self.recorder.stop)
 
     def _finish_dictation(self) -> None:
-        audio = self.recorder.stop()
         self._mode = None
         self._handsfree = False
         self.title = ICON_WORKING
         self._bar_state("working")
-        threading.Thread(target=self._process_dictation, args=(audio,), daemon=True).start()
+
+        def stop_and_process() -> None:
+            audio = self.recorder.stop()
+            threading.Thread(
+                target=self._process_dictation, args=(audio,), daemon=True
+            ).start()
+
+        self._audio_exec.submit(stop_and_process)
 
     def _finish_command(self) -> None:
-        audio = self.recorder.stop()
         self._mode = None
         self.title = ICON_WORKING
         self._bar_state("working")
-        threading.Thread(target=self._process_command, args=(audio,), daemon=True).start()
+
+        def stop_and_process() -> None:
+            audio = self.recorder.stop()
+            threading.Thread(
+                target=self._process_command, args=(audio,), daemon=True
+            ).start()
+
+        self._audio_exec.submit(stop_and_process)
 
     # --- pipelines ----------------------------------------------------------------
 
@@ -337,7 +369,12 @@ class QuillApp(rumps.App):
             return ""
         import mlx_whisper
 
-        result = mlx_whisper.transcribe(audio, path_or_hf_repo=config.WHISPER_MODEL)
+        result = mlx_whisper.transcribe(
+            audio,
+            path_or_hf_repo=config.WHISPER_MODEL,
+            language=config.WHISPER_LANGUAGE,
+            **config.WHISPER_DECODE_OPTIONS,
+        )
         return result["text"].strip()
 
     def _process_dictation(self, audio: np.ndarray) -> None:
