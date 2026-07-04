@@ -7,6 +7,7 @@ lands. It joins all Spaces and full-screen apps, and never steals focus
 toggles hands-free dictation.
 """
 
+import logging
 import math
 import time
 from collections import deque
@@ -34,6 +35,8 @@ from Foundation import NSObject, NSString, NSThread, NSTimer
 
 from . import config
 
+log = logging.getLogger("quill.flowbar")
+
 # Panel sizes per state: (width, height)
 _SIZES = {
     "idle": (56, 24),
@@ -45,10 +48,17 @@ _SIZES = {
 
 
 class _MainThread(NSObject):
-    """Run arbitrary Python callables on the AppKit main thread."""
+    """Run arbitrary Python callables on the AppKit main thread.
+
+    Every PyObjC callback body is guarded: a Python exception that escapes
+    into Objective-C aborts the whole process (SIGABRT).
+    """
 
     def run_(self, fn):
-        fn()
+        try:
+            fn()
+        except Exception:
+            log.exception("Main-thread dispatch failed")
 
 
 _dispatcher = None
@@ -86,8 +96,11 @@ class _BarView(NSView):
         return True
 
     def mouseDown_(self, event):
-        if self.on_click is not None:
-            self.on_click()
+        try:
+            if self.on_click is not None:
+                self.on_click()
+        except Exception:
+            log.exception("Flow bar click handler failed")
 
     # -- animation timer -------------------------------------------------------
 
@@ -109,24 +122,27 @@ class _BarView(NSView):
     # -- drawing ----------------------------------------------------------------
 
     def drawRect_(self, _rect):
-        bounds = self.bounds()
-        w, h = bounds.size.width, bounds.size.height
+        try:
+            bounds = self.bounds()
+            w, h = bounds.size.width, bounds.size.height
 
-        pill = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
-            bounds, h / 2, h / 2
-        )
-        _color(config.BAR_BACKGROUND).setFill()
-        pill.fill()
+            pill = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
+                bounds, h / 2, h / 2
+            )
+            _color(config.BAR_BACKGROUND).setFill()
+            pill.fill()
 
-        if self.state in ("recording", "command"):
-            accent = config.BAR_ACCENT if self.state == "recording" else config.BAR_COMMAND
-            self._draw_waveform(w, h, accent)
-        elif self.state == "working":
-            self._draw_dots(w, h)
-        elif self.state == "flash":
-            self._draw_text(self.flash_text, w, h, 12)
-        else:  # idle
-            self._draw_text("🪶", w, h, 13)
+            if self.state in ("recording", "command"):
+                accent = config.BAR_ACCENT if self.state == "recording" else config.BAR_COMMAND
+                self._draw_waveform(w, h, accent)
+            elif self.state == "working":
+                self._draw_dots(w, h)
+            elif self.state == "flash":
+                self._draw_text(self.flash_text, w, h, 12)
+            else:  # idle
+                self._draw_text("🪶", w, h, 13)
+        except Exception:
+            log.exception("Flow bar draw failed")
 
     def _draw_waveform(self, w, h, accent):
         levels = list(self.levels)

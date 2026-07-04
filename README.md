@@ -54,10 +54,21 @@ mkdir -p ~/.quill && echo 'ANTHROPIC_API_KEY=sk-ant-...' > ~/.quill/env && chmod
 Without a key, dictation still works fully — you get raw Whisper transcripts and
 Command Mode is disabled.
 
+## Reliability
+
+- The Python environment lives at `~/.quill/venv`, **outside iCloud-synced
+  Documents** — iCloud's Optimize Mac Storage evicts big rarely-read files and
+  corrupts venvs kept inside `~/Documents` (this bit us: the app became
+  unlaunchable after a sleep).
+- `build_app.sh` installs a **watchdog LaunchAgent** (`com.treytiller.quill.watchdog`)
+  that relaunches Quill within a minute if it dies unexpectedly, and registers
+  Quill as a **login item**. Quitting intentionally (Dock → Quit, ⌘Q) is
+  respected — the watchdog only revives unexpected deaths.
+
 ## Development
 
 ```sh
-uv run quill                     # run from a terminal (permissions attach to the terminal)
+UV_PROJECT_ENVIRONMENT=~/.quill/venv uv run quill   # keep the env out of iCloud
 ```
 
 Settings (hotkeys, models, Flow Bar colors) live in [quill/config.py](quill/config.py).

@@ -4,8 +4,10 @@ Hold Right Option: dictate (release to insert). Double-tap it: hands-free.
 Hold Right Command with text selected: Command Mode (speak an edit instruction).
 """
 
+import fcntl
 import logging
 import subprocess
+import sys
 import threading
 import time
 
@@ -441,9 +443,25 @@ class QuillApp(rumps.App):
         subprocess.run(["open", "-t", str(config.DICTIONARY_FILE)])
 
 
+RUN_MARKER = config.CONFIG_DIR / "should_run"
+_lock_file = None  # held for the process lifetime
+
+
+def _acquire_single_instance() -> bool:
+    """Only one Quill at a time (the watchdog and Dock can race at wake)."""
+    global _lock_file
+    config.CONFIG_DIR.mkdir(exist_ok=True)
+    _lock_file = open(config.CONFIG_DIR / "quill.lock", "w")
+    try:
+        fcntl.flock(_lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return True
+    except OSError:
+        return False
+
+
 def _install_dock_delegate() -> None:
-    """Clicking Quill's Dock icon while it's running opens the Hub window,
-    like reopening a regular desktop app."""
+    """Dock-icon clicks open the Hub; a user-intended Quit clears the run
+    marker so the watchdog knows not to resurrect us."""
     import rumps.rumps as _rumps_internal
 
     class QuillDelegate(_rumps_internal.NSApp):
@@ -454,10 +472,21 @@ def _install_dock_delegate() -> None:
                 log.error("Could not open Hub on Dock click: %s", exc)
             return False
 
+        def applicationShouldTerminate_(self, _sender):
+            try:
+                RUN_MARKER.unlink(missing_ok=True)
+            except Exception:
+                log.exception("Could not clear run marker")
+            return 1  # NSTerminateNow
+
     _rumps_internal.NSApp = QuillDelegate
 
 
 def main() -> None:
+    if not _acquire_single_instance():
+        log.info("Quill is already running — exiting")
+        sys.exit(0)
+    RUN_MARKER.touch()  # watchdog revives us while this exists
     _install_dock_delegate()
     QuillApp().run()
 
