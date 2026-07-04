@@ -2,12 +2,21 @@
 
 import json
 import logging
+import os
+from pathlib import Path
 
 import anthropic
 
 from . import config
 
 log = logging.getLogger("quill.ai")
+
+
+def _credentials_present() -> bool:
+    """Cheap local check — avoids a doomed ~1.3s network call per session."""
+    if os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN"):
+        return True
+    return (Path.home() / ".config" / "anthropic").exists()  # `ant auth login` profile
 
 CLEANUP_PROMPT = """You are the post-processing stage of Quill, a dictation app. The user \
 spoke into a microphone; you receive the raw speech-to-text transcript. Your only job is \
@@ -53,7 +62,9 @@ class Brain:
 
     def __init__(self) -> None:
         self.cleanup_enabled = config.CLEANUP_ENABLED
-        self._auth_failed = False
+        self._auth_failed = not _credentials_present()
+        if self._auth_failed:
+            log.info("No Anthropic credentials found — AI features off, raw transcripts")
         self._client = anthropic.Anthropic(
             timeout=config.CLAUDE_TIMEOUT_SECONDS, max_retries=1
         )

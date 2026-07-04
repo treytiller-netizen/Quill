@@ -19,11 +19,13 @@ DOUBLE_TAP_SECONDS = 0.5   # max gap between taps to trigger hands-free mode
 TAP_MAX_SECONDS = 0.35     # a press shorter than this counts as a "tap"
 
 # --- Transcription ----------------------------------------------------------
-# Any MLX-converted Whisper repo on Hugging Face. The 4-bit quantized turbo
-# uses ~1/3 the memory of full turbo at near-identical speed and accuracy —
-# the right default on an 8 GB machine (long dictations swap-thrash otherwise).
-# Full precision alternative: "mlx-community/whisper-large-v3-turbo"
-WHISPER_MODEL = "mlx-community/whisper-large-v3-turbo-q4"
+# Any MLX-converted Whisper repo on Hugging Face. On this 8 GB machine
+# (benchmarked, loaded system): small ≈ 0.8s/sentence and ~4s per 45s ramble
+# with very good clear-speech accuracy; large-turbo-q4 ≈ 2.5-3.5s/sentence
+# with best-in-class accuracy. Trey picked small for speed (2026-07-04).
+# More accurate: "mlx-community/whisper-large-v3-turbo-q4"
+# Even faster:   "mlx-community/whisper-base-mlx"
+WHISPER_MODEL = "mlx-community/whisper-small-mlx"
 SAMPLE_RATE = 16_000
 MIN_RECORDING_SECONDS = 0.4  # ignore accidental taps
 

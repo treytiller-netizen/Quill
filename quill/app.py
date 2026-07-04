@@ -4,6 +4,7 @@ Hold Right Option: dictate (release to insert). Double-tap it: hands-free.
 Hold Right Command with text selected: Command Mode (speak an edit instruction).
 """
 
+import ctypes
 import fcntl
 import logging
 import subprocess
@@ -11,6 +12,19 @@ import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+
+_QOS_CLASS_USER_INITIATED = 0x19
+
+
+def _boost_thread_qos() -> None:
+    """Pin this thread to USER_INITIATED QoS. Without it, worker threads run
+    at background QoS and macOS schedules them on efficiency cores — in-app
+    transcription measured 4-5x slower than the same code in a plain script."""
+    try:
+        libc = ctypes.CDLL(None)
+        libc.pthread_set_qos_class_self_np(_QOS_CLASS_USER_INITIATED, 0)
+    except Exception:
+        pass
 
 import numpy as np
 import rumps
@@ -141,11 +155,17 @@ class QuillApp(rumps.App):
         self._last_tap = 0.0
         self._selection = ""
         self._target_app: str | None = None
+        self._target_pid: int | None = None
         self._lock = threading.Lock()
+        # Serializes MLX use between the press-time warm-up and real work.
+        self._mlx_lock = threading.Lock()
+        self._last_transcribe = 0.0
         # ALL CoreAudio stream operations run on this single worker, in order.
         # Starting/stopping the stream on the main thread — inside the event
         # tap callback — deadlocks CoreAudio (HALB_Mutex vs the main run loop).
-        self._audio_exec = ThreadPoolExecutor(max_workers=1, thread_name_prefix="audio")
+        self._audio_exec = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="audio", initializer=_boost_thread_qos
+        )
 
         self.status_item = rumps.MenuItem("Loading Whisper model…")
         self.status_item.set_callback(None)
@@ -187,6 +207,21 @@ class QuillApp(rumps.App):
         NSApplication.sharedApplication().setActivationPolicy_(
             NSApplicationActivationPolicyRegular
         )
+
+        # Opt out of App Nap for the app's lifetime — a napped Quill transcribes
+        # and delivers at a crawl after sitting idle in the background.
+        try:
+            from Foundation import (
+                NSActivityUserInitiatedAllowingIdleSystemSleep,
+                NSProcessInfo,
+            )
+
+            self._activity_token = NSProcessInfo.processInfo().beginActivityWithOptions_reason_(
+                NSActivityUserInitiatedAllowingIdleSystemSleep,
+                "Quill real-time dictation",
+            )
+        except Exception:
+            log.exception("Could not disable App Nap")
 
         # Trigger the one-time Accessibility prompt (needed for pasting).
         try:
@@ -233,6 +268,7 @@ class QuillApp(rumps.App):
         log.info("Loading Whisper model %s…", config.WHISPER_MODEL)
         silence = np.zeros(config.SAMPLE_RATE // 2, dtype=np.float32)
         mlx_whisper.transcribe(silence, path_or_hf_repo=config.WHISPER_MODEL)
+        self._last_transcribe = time.time()
         self._model_ready = True
         self.title = ICON_IDLE
         self._update_status()
@@ -310,9 +346,11 @@ class QuillApp(rumps.App):
             self._mode = mode
         self._press_time = time.time()
         self._target_app = frontmost_app()
+        self._target_pid = focus.frontmost_pid()
         self._selection = ""
         self.title = ICON_RECORDING
         self._bar_state("recording" if mode == "dictate" else "command")
+        self._warm_if_cold()  # page the model back in while the user speaks
 
         def start_stream() -> None:
             try:
@@ -364,17 +402,52 @@ class QuillApp(rumps.App):
 
     # --- pipelines ----------------------------------------------------------------
 
+    def _warm_if_cold(self) -> None:
+        """After idle, macOS pages the model out; the first transcription then
+        stalls for seconds. Run a tiny silence decode in parallel with the
+        recording so the model is hot again by the time the user releases."""
+        if time.time() - self._last_transcribe < 60:
+            return
+
+        def warm() -> None:
+            _boost_thread_qos()
+            try:
+                import mlx_whisper
+
+                with self._mlx_lock:
+                    t0 = time.perf_counter()
+                    silence = np.zeros(config.SAMPLE_RATE, dtype=np.float32)
+                    mlx_whisper.transcribe(
+                        silence,
+                        path_or_hf_repo=config.WHISPER_MODEL,
+                        language=config.WHISPER_LANGUAGE,
+                        **config.WHISPER_DECODE_OPTIONS,
+                    )
+                    log.info("press-time warm-up: %.0fms", (time.perf_counter() - t0) * 1000)
+            except Exception:
+                log.exception("Warm-up failed")
+
+        threading.Thread(target=warm, daemon=True).start()
+
     def _transcribe(self, audio: np.ndarray) -> str:
         if len(audio) < config.SAMPLE_RATE * config.MIN_RECORDING_SECONDS:
             return ""
         import mlx_whisper
 
-        result = mlx_whisper.transcribe(
-            audio,
-            path_or_hf_repo=config.WHISPER_MODEL,
-            language=config.WHISPER_LANGUAGE,
-            **config.WHISPER_DECODE_OPTIONS,
-        )
+        with self._mlx_lock:
+            t0 = time.perf_counter()
+            result = mlx_whisper.transcribe(
+                audio,
+                path_or_hf_repo=config.WHISPER_MODEL,
+                language=config.WHISPER_LANGUAGE,
+                **config.WHISPER_DECODE_OPTIONS,
+            )
+            log.info(
+                "transcribe: %.0fms for %.1fs audio",
+                (time.perf_counter() - t0) * 1000,
+                len(audio) / config.SAMPLE_RATE,
+            )
+        self._last_transcribe = time.time()
         # Return MLX's cached Metal buffers to the OS — on an 8 GB machine a
         # long dictation otherwise leaves hundreds of MB parked on the GPU
         # cache and pushes the system into swap.
@@ -386,14 +459,35 @@ class QuillApp(rumps.App):
             pass
         return result["text"].strip()
 
+    def _probe_focus(self) -> dict:
+        """Run the Accessibility queries in parallel with transcription."""
+        state: dict = {}
+
+        target_pid = self._target_pid
+
+        def probe() -> None:
+            state["trusted"] = focus.trusted()
+            state["input"] = focus.text_input_focused(target_pid)
+
+        thread = threading.Thread(target=probe, daemon=True)
+        thread.start()
+        state["_thread"] = thread
+        return state
+
     def _process_dictation(self, audio: np.ndarray) -> None:
+        _boost_thread_qos()
         try:
+            focus_state = self._probe_focus()
             transcript = self._transcribe(audio)
             if not transcript:
                 self._bar_state("idle")
                 return
+            t0 = time.perf_counter()
             text = self.brain.clean(transcript, self._target_app)
-            self._deliver(text)
+            t1 = time.perf_counter()
+            self._deliver(text, focus_state)
+            log.info("clean: %.0fms, deliver: %.0fms",
+                     (t1 - t0) * 1000, (time.perf_counter() - t1) * 1000)
             history.add(transcript, text, self._target_app, mode="dictate",
                         duration=len(audio) / config.SAMPLE_RATE)
             self._after_insert()
@@ -403,19 +497,27 @@ class QuillApp(rumps.App):
         finally:
             self.title = ICON_IDLE
 
-    def _deliver(self, text: str) -> None:
+    def _deliver(self, text: str, focus_state: dict | None = None) -> None:
         """Insert into the focused text input; otherwise copy to the clipboard.
 
         Mirrors Wispr Flow: paste only lands somewhere real. Without a focused
         input (or without Accessibility permission), the text goes to the
         clipboard and the Flow Bar says so.
         """
-        if not focus.trusted():
+        if focus_state and "_thread" in focus_state:
+            focus_state["_thread"].join(timeout=2)
+        trusted = focus_state.get("trusted") if focus_state else None
+        has_input = focus_state.get("input") if focus_state else None
+        if trusted is None:
+            trusted = focus.trusted()
+        if not trusted:
             _pbcopy(text.encode("utf-8"))
             log.warning("Accessibility not granted — copied instead of pasting")
             self._bar_state("flash", "📋 Copied — enable Accessibility to insert")
             return
-        if focus.text_input_focused():
+        if has_input is None:
+            has_input = focus.text_input_focused()
+        if has_input:
             insert_text(text)
             self._bar_state("flash", "✓ inserted")
         else:
@@ -423,7 +525,9 @@ class QuillApp(rumps.App):
             self._bar_state("flash", "📋 Copied — press ⌘V")
 
     def _process_command(self, audio: np.ndarray) -> None:
+        _boost_thread_qos()
         try:
+            focus_state = self._probe_focus()
             instruction = self._transcribe(audio)
             if not instruction:
                 self._bar_state("idle")
@@ -435,7 +539,7 @@ class QuillApp(rumps.App):
             if result is None:
                 self._bar_state("flash", "✗ command failed")
                 return
-            self._deliver(result)
+            self._deliver(result, focus_state)
             history.add(instruction, result, self._target_app, mode="command",
                         duration=len(audio) / config.SAMPLE_RATE)
             self._after_insert()
@@ -532,6 +636,15 @@ def main() -> None:
     if not _acquire_single_instance():
         log.info("Quill is already running — exiting")
         sys.exit(0)
+    # Persistent log — GUI launches have no visible stderr.
+    from logging.handlers import RotatingFileHandler
+
+    handler = RotatingFileHandler(
+        config.CONFIG_DIR / "quill.log", maxBytes=512_000, backupCount=1
+    )
+    handler.setFormatter(logging.Formatter("%(asctime)s %(name)s: %(message)s"))
+    logging.getLogger().addHandler(handler)
+
     RUN_MARKER.touch()  # watchdog revives us while this exists
     _install_dock_delegate()
     QuillApp().run()
